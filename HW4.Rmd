@@ -1,0 +1,389 @@
+---
+title: "HW3"
+author: "Group A4 24"
+date: "6 June 2024"
+output:
+  html_document:
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+ - Lior Belkin, 315818765, lior.belkin@mail.huji.ac.il
+ - Narmeen Shwiki, 322764895, narmeen.shwiki@mail.huji.ac.il  
+ - Yael Mendelsohn ,345459754. yael.mendelsohn@mail.huji.ac.il
+
+### Libraries used
+
+```{r}
+library(data.table)
+library(splines)
+library(ggplot2)
+library(scales)
+library(dplyr)
+library(openxlsx)
+```
+
+## Loading the data
+
+```{r}
+#loading the data
+load("reads_gc_5K.rda")
+```
+
+
+```{r}
+if(any(GC_5K>1)){ 
+  GC_5K = GC_5K / 5000
+}
+```
+
+
+# Step 2: cleaning the data (removing outliers)
+
+First, let's try to visualize our data. We do this with the scatter-plot below. 
+Each data-point represents one of the 49,440 bins. Clearly we have to remove outliers in order to be able to properly visualize our data. 
+
+```{r}
+ggplot(data.frame(GC_5K = GC_5K, reads_5K = reads_5K), 
+            aes(x = GC_5K, y = reads_5K)) +
+  geom_point(shape = 20, alpha = 0.5, color = "blue") +
+  labs(
+    title = "Percentage GC's and coverage per bin",
+    subtitle="(raw data, including outliers)",
+    x = "Percentage GC's in bin",
+    y = "Coverage in bin (i.e number of reads starting in bin)"
+  )+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()
+```
+
+1) We remove the bins and in which the percentage GC's is 0% 
+Reason: we think there's a mistake in the data, how could it be possible that among the 5000 bases there is not even one which is C or G? We don't want to use these bins. 
+
+```{r}
+ggplot(data.frame(GC_5K,
+                  index_of_bin=seq_along(GC_5K),
+                  color=ifelse(GC_5K!=0,"blue","red")),
+       aes(x=index_of_bin,
+           y=GC_5K,
+           color=color)
+       )+
+  geom_point(size=0.7)+
+  scale_color_identity()+
+  labs(title="Illustrating bins in which there are no CG's",
+       subtitle="(bins in which there are no CG's are red)",
+       x="Index of bin",
+       y="Percentage GC's in bin")+
+  scale_x_continuous(labels=comma)+
+  theme_minimal()
+```
+
+
+```{r}
+indices_GC_5K_is_zero<-which(GC_5K==0)
+GC_5K_clean<-GC_5K[-indices_GC_5K_is_zero]
+reads_5K_clean<-reads_5K[-indices_GC_5K_is_zero]
+```
+
+
+2) We exclude bins where the number of reads exceeds the 99.9th percentile threshold. 
+Reason: we want to focus our analysis on typical bins, not outliers. Also, we'll be able to better visualize the data. 
+
+```{r}
+quantile_999<-quantile(reads_5K_clean,0.999)
+quantile_999
+
+indices_reads_5K_is_above_Q999<-which(reads_5K_clean>quantile_999)
+
+GC_5K_clean<-GC_5K_clean[-indices_reads_5K_is_above_Q999]
+reads_5K_clean<-reads_5K_clean[-indices_reads_5K_is_above_Q999]
+```
+
+
+```{r}
+ggplot(data.frame(GC_5K_clean = GC_5K_clean, reads_5K_clean = reads_5K_clean), 
+            aes(x = GC_5K_clean, y = reads_5K_clean)) +
+  geom_point(shape = 20, alpha = 0.5, color = "blue") +
+  labs(
+    title = "Percentage GC's and coverage per bin after outliers are removed",
+    subtitle="(clean data)",
+    x = "Percentage GC's in bin",
+    y = "Coverage in bin (i.e number of reads starting in bin)"
+  )+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()
+```
+
+# Step 3: performing piecewise/spline polynomial regression 
+
+```{r}
+
+# Set knots based on data characteristics
+knots <- c(0.26, 0.53)
+
+# Fit the polynomial regression model
+degree <- 3 
+poly_fit <- lm(reads_5K_clean ~ bs(GC_5K_clean, knots = knots, degree = degree))
+
+# Generate a sequence of GC content for predictions
+GC_5K_seq <- seq(min(GC_5K_clean), max(GC_5K_clean), length.out = 100)
+
+# Create the design matrix for the sequence using the same basis function
+design_matrix_seq <- bs(GC_5K_seq, knots = knots, degree = degree)
+
+# Predict using the polynomial model
+predicted_poly <- predict(poly_fit, newdata = data.frame(GC_5K_clean = GC_5K_seq))
+
+```
+
+```{r}
+# Sample 10% of the data points
+set.seed(100)
+sample_indices <- sample(length(GC_5K_clean), size = 0.1 * length(GC_5K_clean))
+
+# Plot the sampled data points
+plot(GC_5K_clean[sample_indices], reads_5K_clean[sample_indices], 
+     main = "Reads Coverage vs GC Content with Polynomial Fit (10% Sample)",
+     xlab = "GC Content", ylab = "Reads Coverage", pch = 20, col = rgb(0, 0, 1, alpha = 0.5))
+
+# Add the polynomial regression line to the plot
+lines(GC_5K_seq, predicted_poly, col = "red", lwd = 2)
+
+# Add dashed lines for knots
+for (i in knots) {
+  abline(v = i, col = "black", lty = 2)
+}
+
+```
+
+```{r}
+regions <- cut(GC_5K_clean[sample_indices], breaks = c(-Inf, knots, Inf))
+
+# Function to plot piecewise constant functions for each region
+plot_piecewise_constant <- function(x, y, regions, knots) {
+  # Sort x, y, and regions based on x
+  order_index <- order(x)
+  x <- x[order_index]
+  y <- y[order_index]
+  regions <- regions[order_index]
+  unique_regions <- sort(unique(regions))
+  
+  for (i in seq_along(unique_regions)) {
+    region_label <- unique_regions[i]
+    x_region <- x[regions == region_label]
+    y_region <- y[regions == region_label]
+    
+    # Calculate the mean for the current region
+    mean_y <- mean(y_region)
+    
+    # Draw the horizontal line for the current region
+    lines(c(min(x_region), max(x_region)), c(mean_y, mean_y), col = "green", lwd = 2)
+    
+    # Draw vertical line connecting to the next segment
+    if (i < length(unique_regions)) {
+      # Next region's boundary and mean
+      next_region_label <- unique_regions[i + 1]
+      x_next_region <- x[regions == next_region_label]
+      mean_next_y <- mean(y[regions == next_region_label])
+      
+      # The boundary x-value where we want the vertical line to be drawn
+      boundary_x <- max(x_region)
+      
+      # Draw the vertical line exactly at the boundary between segments
+      lines(c(boundary_x, boundary_x), c(mean_y, mean_next_y), col = "green", lwd = 2)
+      
+      # Ensure there is no gap by extending the horizontal line of the next segment from boundary_x
+      lines(c(boundary_x, max(x_next_region)), c(mean_next_y, mean_next_y), col = "green", lwd = 2)
+    }
+  }
+}
+
+plot(GC_5K_clean[sample_indices], reads_5K_clean[sample_indices], 
+     main = "Reads Coverage vs GC Content with Polynomial Fit (10% Sample)",
+     xlab = "% GC", ylab = "Reads Coverage", pch = 20, col = rgb(0, 0, 1, alpha = 0.5))
+lines(GC_5K_seq, predicted_poly, col = "red", lwd = 2)
+for (i in knots) {
+  abline(v = i, col = "black", lty = 2)
+}
+# plot piecewise constant functions on the sampled data
+plot_piecewise_constant(GC_5K_clean[sample_indices], reads_5K_clean[sample_indices], regions, knots)
+
+```
+
+
+```{r}
+# Function to plot piecewise linear functions for each region
+plot_piecewise_linear <- function(x, y, knots) {
+  # Sort x and y based on x
+  order_index <- order(x)
+  x <- x[order_index]
+  y <- y[order_index]
+
+  # Add knots to the boundaries of the data
+  knots <- c(min(x), knots, max(x))
+
+  # Initialize variables to store the previous end point
+  prev_end_x <- NA
+  prev_end_y <- NA
+
+  # Loop over each segment defined by the knots
+  for (i in 1:(length(knots) - 1)) {
+    start_knot <- knots[i]
+    end_knot <- knots[i + 1]
+
+    # Get data within the current segment
+    segment_index <- which(x >= start_knot & x <= end_knot)
+    x_segment <- x[segment_index]
+    y_segment <- y[segment_index]
+
+    # Fit a linear model for the current segment
+    lm_segment <- lm(y_segment ~ x_segment)
+
+    # Create a sequence of x values for a smooth line
+    x_pred <- seq(start_knot, end_knot, length.out = 100)
+    # Predict y values using the linear model
+    y_pred <- predict(lm_segment, newdata = data.frame(x_segment = x_pred))
+
+    # Plot the linear segment
+    lines(x_pred, y_pred, col = "green", lwd = 2)
+
+    # If there's a previous segment, connect to the current one with a vertical line at the start_knot
+    if (!is.na(prev_end_x)) {
+      # Draw a vertical line connecting the segments
+      lines(c(prev_end_x, start_knot), c(prev_end_y, y_pred[1]), col = "green", lwd = 2)
+    }
+
+    # Update previous end point to the current segment's end
+    prev_end_x <- end_knot
+    prev_end_y <- y_pred[length(y_pred)]
+  }
+}
+
+plot(GC_5K_clean[sample_indices], reads_5K_clean[sample_indices], 
+     main = "Reads Coverage vs GC Content with Polynomial Fit (10% Sample)",
+     xlab = "% GC", ylab = "Reads Coverage", pch = 20, col = rgb(0, 0, 1, alpha = 0.5))
+lines(GC_5K_seq, predicted_poly, col = "red", lwd = 2)
+for (i in knots) {
+  abline(v = i, col = "black", lty = 2)
+}
+
+# Call the function to plot piecewise linear functions on the sampled data
+plot_piecewise_linear(GC_5K_clean[sample_indices], reads_5K_clean[sample_indices], knots)
+
+```
+
+# Question B
+```{r}
+predicted_reads <- predict(poly_fit, newdata = data.frame(GC_5K_clean = GC_5K_clean))
+
+# Calculate the residuals
+residuals <- reads_5K_clean - predicted_reads
+
+# Create data frame for residuals
+residuals_data <- data.frame(GC_5K_clean = GC_5K_clean, residuals = residuals)
+
+# Plot the residuals against GC content with alpha = 0.5
+residuals_plot <- ggplot(residuals_data, aes(x = GC_5K_clean, y = residuals)) +
+  geom_point(color = 'blue', alpha = 0.5) +
+  geom_hline(yintercept = 0, color = 'red', linetype = 'solid', linewidth = 1) +
+  labs(title = "Residuals vs GC Content",
+       x = "GC Content",
+       y = "Residuals") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+print(residuals_plot)
+```
+
+# Question C: finding a numerical measure to compare the linear model to our piecewise polynomial model
+
+```{r}
+# Fit a linear model to the data
+linear_model <- lm(reads_5K_clean ~ GC_5K_clean)
+
+# Calculate predictions from the linear model
+linear_predictions <- predict(linear_model, newdata = data.frame(GC_5K_clean = GC_5K_clean))
+
+# Use the existing polynomial spline model to get predictions
+spline_predictions <- predict(poly_fit, newdata = data.frame(GC_5K_clean = GC_5K_clean))
+
+# Calculate MSE for the polynomial spline model
+spline_mse <- mean((reads_5K_clean - spline_predictions)^2)
+
+# Calculate MSE for the linear model
+linear_mse <- mean((reads_5K_clean - linear_predictions)^2)
+
+# Calculate the improvement ratio
+improvement_ratio <- linear_mse / spline_mse
+
+# Print the results
+cat("MSE of Polynomial Spline model:", spline_mse, "\n")
+cat("MSE of Linear model:", linear_mse, "\n")
+cat("Improvement in fit (Linear MSE / Spline MSE):", improvement_ratio, "\n")
+
+```
+
+
+# Question D: Analysing the residuals
+
+
+```{r}
+# Calculate the residuals
+spline_predictions <- predict(poly_fit, newdata = data.frame(GC_5K_clean = GC_5K_clean))
+residuals <- reads_5K_clean - spline_predictions
+
+database_residuals<-data.frame(residuals=residuals,
+                               GC_5K_clean=GC_5K_clean)
+
+breaks_GC_percentage<-seq(0,1,by=0.1)
+
+database_residuals<-database_residuals%>%
+  mutate(GC_percentage=cut(GC_5K_clean,breaks=breaks_GC_percentage))
+
+# Create barplot
+ggplot(data.frame(database_residuals%>%group_by(GC_percentage)%>%summarize(count_bins=n())),
+       aes(x=GC_percentage,
+           y=count_bins))+
+  geom_bar(stat="identity",fill="purple")+
+  labs(title="Distribution of the GC-percentage in bins",
+       subtitle="(each bar represents the number of bins in which there are between (i-1)% to i% CG's",
+       x="GC Percentage",
+       y="Number of bins")+
+  scale_y_continuous(labels=comma)+
+  theme_minimal()
+
+# Create boxplot
+ggplot(database_residuals, aes(x = GC_percentage, y = residuals)) +
+  geom_boxplot() +
+  labs(title = "Residuals by GC Percentage Range",
+       subtitle="[boxplot i represents bins in which percentage GC's is between (i-1)% to i%]",
+       x = "GC Percentage",
+       y = "Residuals") +
+  theme_minimal()
+```
+
+
+
+```{r}
+statistic_residuals<-database_residuals%>%group_by(GC_percentage)%>%
+  summarize(count_bins=n(),
+            mean(residuals),
+            sd(residuals),
+            Q1_residuals=quantile(residuals,0.25),
+            Q3_residuals=quantile(residuals,0.75),
+            IQR=Q3_residuals-Q1_residuals,
+            Lower_outlier_bound=Q1_residuals-1.5*IQR,
+            Upper_outlier_bound=Q3_residuals+1.5*IQR,
+            count_outlier_bins=sum(ifelse(residuals<Lower_outlier_bound | residuals>Upper_outlier_bound, 1, 0)),
+            percentage_outliers=count_outlier_bins/n()
+            )
+
+create_statistic_residuals<-FALSE
+  if(create_statistic_residuals){
+    write.xlsx(statistic_residuals,"statistic_residuals.xlsx")
+  }
+
+
+statistic_residuals
+```
